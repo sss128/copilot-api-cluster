@@ -1,0 +1,94 @@
+# Portainer 部署配置 - 支持环境变量
+# 使用命名卷进行数据持久化，所有关键配置均可通过环境变量自定义
+# Portainer从Git克隆代码后，会自动处理相对路径
+
+version: '3.8'
+
+services:
+  # --- 节点 1：账号 A ---
+  copilot-node-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.copilot-api-src
+      # 代理配置（可选），通过环境变量控制
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+    container_name: copilot-node-1
+    restart: unless-stopped
+    environment:
+      # GH_TOKEN 从持久化存储读取：/root/.local/share/copilot-api/
+      # 首次运行需要认证，认证后token会持久化到volume中
+      - HOST=0.0.0.0
+    # 使用命名卷持久化认证状态（建议保留，避免每次重启需要重新认证）
+    volumes:
+      - copilot_data_node1:/root/.local/share/copilot-api
+    networks:
+      - copilot-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4141/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # --- 节点 2：账号 B ---
+  copilot-node-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.copilot-api-src
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+    container_name: copilot-node-2
+    restart: unless-stopped
+    environment:
+      - HOST=0.0.0.0
+    volumes:
+      - copilot_data_node2:/root/.local/share/copilot-api
+    networks:
+      - copilot-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4141/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # --- 智能网关 ---
+  smart-gateway:
+    build: ./gateway
+    container_name: smart-gateway
+    restart: always
+    # 对外端口通过环境变量配置，默认8080
+    ports:
+      - "${GATEWAY_PORT:-8080}:3000"
+    environment:
+      # 网关内部端口，通过环境变量可配置（需与上面映射的容器端口一致）
+      PORT: ${GATEWAY_CONTAINER_PORT:-3000}
+      # 节点配置：通过环境变量注入，支持多个账号
+      COPILOT_NODES: >-
+        [{"url": "http://copilot-node-1:4141", "token": "${TOKEN_ACCOUNT_1}"}, {"url": "http://copilot-node-2:4141", "token": "${TOKEN_ACCOUNT_2}"}]
+      # 网关高级配置（可选）
+      POLL_INTERVAL: ${POLL_INTERVAL:-300000}
+      RETRY_LIMIT: ${RETRY_LIMIT:-3}
+    depends_on:
+      copilot-node-1:
+        condition: service_healthy
+      copilot-node-2:
+        condition: service_healthy
+    networks:
+      - copilot-net
+
+# 命名卷定义（Portainer/Docker会自动管理）
+# 注意：删除stack时如选择删除卷，认证数据将丢失
+volumes:
+  copilot_data_node1:
+    driver: local
+  copilot_data_node2:
+    driver: local
+
+# 网络定义
+networks:
+  copilot-net:
+    driver: bridge

@@ -1,0 +1,64 @@
+# 从源码构建 copilot-api
+# 基于官方 Dockerfile，但完全从 Git 仓库构建
+
+# 构建参数：Git 仓库、分支和代理设置
+ARG GIT_REPO=https://github.com/ericc-ch/copilot-api.git
+ARG GIT_BRANCH=master
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
+# 第一阶段：克隆和构建
+FROM oven/bun:1.2.19-alpine AS builder
+
+# 设置代理（如果提供）
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+
+WORKDIR /build
+
+# 安装 git 用于克隆
+RUN apk add --no-cache git
+
+# 克隆仓库
+ARG GIT_REPO
+ARG GIT_BRANCH
+RUN git clone --depth 1 --branch ${GIT_BRANCH} ${GIT_REPO} /build
+
+# 进入项目目录并安装依赖
+WORKDIR /build
+RUN bun install --frozen-lockfile
+
+# 构建项目
+RUN bun run build
+
+# 第二阶段：运行环境
+FROM oven/bun:1.2.19-alpine AS runner
+WORKDIR /app
+
+# 安装必要的工具（wget 用于健康检查）
+RUN apk add --no-cache wget curl
+
+# 从构建阶段复制 package.json 和 lock 文件
+COPY --from=builder /build/package.json /build/bun.lock ./
+
+# 安装生产依赖
+RUN bun install --frozen-lockfile --production --ignore-scripts --no-cache
+
+# 从构建阶段复制构建结果
+COPY --from=builder /build/dist ./dist
+
+# 暴露端口
+EXPOSE 4141
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget --spider -q http://localhost:4141/ || exit 1
+
+# 复制 entrypoint 脚本
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# 设置入口点
+ENTRYPOINT ["/entrypoint.sh"]

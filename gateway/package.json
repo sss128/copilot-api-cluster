@@ -1,0 +1,13 @@
+{
+  "name": "copilot-smart-gateway",
+  "version": "1.0.0",
+  "main": "gateway.js",
+  "scripts": {
+    "start": "node gateway.js"
+  },
+  "dependencies": {
+    "fastify": "^4.26.2",
+    "axios": "^1.6.8",
+    "@fastify/cors": "^9.0.1"
+  }
+}
