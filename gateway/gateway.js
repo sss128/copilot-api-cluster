@@ -28,6 +28,9 @@ let nodeRegistry = NODES_CONFIG.map((node, index) => ({
     failureCount: 0
 }));
 
+// 当前活跃节点索引（主备模式的关键）
+let activeNodeIndex = 0;
+
 const server = Fastify({
     logger: true,
     connectionTimeout: 60000 // 设置较长的超时以适应 LLM 生成时间
@@ -113,27 +116,96 @@ function startScheduler() {
 }
 
 /**
- * 路由策略：选择最佳节点
- * 策略：在 READY 状态的节点中，选择剩余额度最大的
+ * 获取当前活跃节点（主备模式）
+ * 返回当前应该使用的节点，如果不活跃则尝试切换到下一个可用节点
  */
-function selectBestNode() {
-    const candidates = nodeRegistry.filter(n => n.status === 'READY' && n.premiumRemaining > 0);
+function getActiveNode() {
+    // 如果当前活跃节点可用，直接返回
+    if (nodeRegistry[activeNodeIndex] &&
+        nodeRegistry[activeNodeIndex].status === 'READY' &&
+        nodeRegistry[activeNodeIndex].premiumRemaining > 0) {
+        return nodeRegistry[activeNodeIndex];
+    }
 
-    if (candidates.length === 0) return null;
+    // 当前节点不可用，查找下一个可用节点
+    for (let i = 0; i < nodeRegistry.length; i++) {
+        const idx = (activeNodeIndex + i) % nodeRegistry.length;
+        const node = nodeRegistry[idx];
+        if (node && node.status === 'READY' && node.premiumRemaining > 0) {
+            activeNodeIndex = idx; // 更新活跃节点索引
+            server.log.info(`切换到活跃节点: ${node.id} (索引: ${idx})`);
+            return node;
+        }
+    }
 
-    // 按剩余额度降序排列
-    candidates.sort((a, b) => b.premiumRemaining - a.premiumRemaining);
+    return null; // 没有可用节点
+}
 
-    return candidates;
+/**
+ * 切换到下一个节点（故障转移）
+ * @param {string} reason - 切换原因
+ */
+function switchToNextNode(reason) {
+    const originalIndex = activeNodeIndex;
+
+    // 寻找下一个可用节点
+    for (let i = 1; i < nodeRegistry.length; i++) {
+        const nextIndex = (activeNodeIndex + i) % nodeRegistry.length;
+        const nextNode = nodeRegistry[nextIndex];
+
+        if (nextNode && nextNode.status !== 'INVALID_TOKEN') {
+            activeNodeIndex = nextIndex;
+            server.log.info(`故障转移: ${reason}`);
+            server.log.info(`从节点 ${originalIndex} 切换到节点 ${nextIndex} (${nextNode.id})`);
+
+            // 立即检查新节点的状态
+            syncNodeQuota(nextNode);
+            return nextNode;
+        }
+    }
+
+    server.log.error('所有节点都不可用');
+    return null;
 }
 
 // --- 路由定义 ---
 
 // 健康检查
 server.get('/health', async () => {
+    const activeNode = nodeRegistry[activeNodeIndex];
     return {
         status: 'ok',
-        nodes: nodeRegistry.map(n => ({ id: n.id, status: n.status, quota: n.premiumRemaining }))
+        activeNodeIndex,
+        activeNodeId: activeNode ? activeNode.id : null,
+        mode: 'active-standby', // 标识当前模式
+        nodes: nodeRegistry.map(n => ({
+            id: n.id,
+            status: n.status,
+            quota: n.premiumRemaining,
+            isActive: n.id === (activeNode ? activeNode.id : null)
+        }))
+    };
+});
+
+// 重置活跃节点到第一个可用节点（管理接口）
+server.post('/admin/reset-active-node', async () => {
+    for (let i = 0; i < nodeRegistry.length; i++) {
+        const node = nodeRegistry[i];
+        if (node && node.status === 'READY' && node.premiumRemaining > 0) {
+            activeNodeIndex = i;
+            server.log.info(`手动重置活跃节点到: ${node.id} (索引: ${i})`);
+            return {
+                success: true,
+                message: `活跃节点已重置到 ${node.id}`,
+                activeNodeIndex: i,
+                activeNodeId: node.id
+            };
+        }
+    }
+
+    return {
+        success: false,
+        message: '没有可用的节点'
     };
 });
 
@@ -141,22 +213,24 @@ server.get('/health', async () => {
 server.all('/v1/*', async (request, reply) => {
     let attempts = 0;
     let lastError = null;
+    let currentNode = null;
 
-    // 复制节点列表引用，用于在本次请求中剔除失败节点
-    let availableNodes = selectBestNode() || [];
+    // 主备模式：始终从当前活跃节点开始
+    while (attempts < nodeRegistry.length) {
+        currentNode = getActiveNode();
 
-    // 排序（selectBestNode已排序，这里可省略，但保留以防万一）
-    availableNodes.sort((a, b) => b.premiumRemaining - a.premiumRemaining);
+        if (!currentNode) {
+            server.log.error("没有可用的活跃节点");
+            break;
+        }
 
-    while (attempts < RETRY_LIMIT && availableNodes.length > 0) {
-        const targetNode = availableNodes[0]; // 取最优
         attempts++;
 
         try {
             // 构造上游 URL
-            const upstreamUrl = `${targetNode.url}${request.url}`;
+            const upstreamUrl = `${currentNode.url}${request.url}`;
 
-            server.log.info(`Forwarding request to ${targetNode.id} (Quota: ${targetNode.premiumRemaining})`);
+            server.log.info(`[主备模式] 转发请求到 ${currentNode.id} (索引: ${activeNodeIndex}, 剩余配额: ${currentNode.premiumRemaining})`);
 
             // 转发请求
             // 注意：使用 responseType: 'stream' 以支持流式输出 (Server-Sent Events)
@@ -166,7 +240,7 @@ server.all('/v1/*', async (request, reply) => {
                 headers: {
                    ...request.headers,
                     host: undefined, // 移除 host 头，避免混淆
-                    authorization: `Bearer ${targetNode.token}` // 强制使用节点的 Token
+                    authorization: `Bearer ${currentNode.token}` // 强制使用节点的 Token
                 },
                 data: request.body,
                 responseType: 'stream',
@@ -175,15 +249,32 @@ server.all('/v1/*', async (request, reply) => {
 
             // 检查是否是业务层面的拒绝 (如额度耗尽)
             // 通常 GitHub 会返回 402, 403 或特定的 429
-            if (proxyResponse.status === 402 || (proxyResponse.status === 403 && checkIsQuotaError(proxyResponse))) {
-                throw new Error('QUOTA_EXHAUSTED_RUNTIME');
+            if (proxyResponse.status === 402 ||
+                (proxyResponse.status === 403 && checkIsQuotaError(proxyResponse)) ||
+                (proxyResponse.status === 429)) {
+
+                server.log.warn(`节点 ${currentNode.id} 配额耗尽或被限流 (状态码: ${proxyResponse.status})`);
+
+                // 标记当前节点为耗尽
+                currentNode.premiumRemaining = 0;
+                currentNode.status = 'DRAINED';
+
+                // 切换到下一个节点
+                const nextNode = switchToNextNode(`节点 ${currentNode.id} 配额耗尽`);
+                if (!nextNode) {
+                    lastError = new Error('所有节点配额都已耗尽');
+                    break;
+                }
+
+                // 继续下一次尝试
+                continue;
             }
 
             // 如果成功 (2xx)，进行乐观扣减
             if (proxyResponse.status >= 200 && proxyResponse.status < 300) {
                 // 简单的扣减策略：假设每次调用消耗 1 个单位
                 // 实际上 Opus 可能消耗更多，但下一次心跳会修正它
-                targetNode.premiumRemaining = Math.max(0, targetNode.premiumRemaining - 1);
+                currentNode.premiumRemaining = Math.max(0, currentNode.premiumRemaining - 1);
             }
 
             // 透传响应头和状态码
@@ -196,29 +287,32 @@ server.all('/v1/*', async (request, reply) => {
             return reply.send(proxyResponse.data);
 
         } catch (error) {
-            server.log.warn(`Request failed on ${targetNode.id}: ${error.message}`);
+            server.log.warn(`节点 ${currentNode.id} 请求失败: ${error.message}`);
 
-            // 惰性失效触发
-            if (error.message === 'QUOTA_EXHAUSTED_RUNTIME' || (error.response && error.response.status === 429)) {
-                targetNode.premiumRemaining = 0;
-                targetNode.status = 'DRAINED';
-                // 立即触发异步刷新，确认真实状态
-                syncNodeQuota(targetNode);
+            // 网络错误或其他异常
+            currentNode.failureCount++;
+            if (currentNode.failureCount >= 3) {
+                currentNode.status = 'OFFLINE';
             }
 
-            // 从当前可用列表中移除，尝试下一个
-            availableNodes.shift();
+            // 切换到下一个节点
+            const nextNode = switchToNextNode(`节点 ${currentNode.id} 发生错误: ${error.message}`);
+            if (!nextNode) {
+                lastError = error;
+                break;
+            }
+
             lastError = error;
         }
     }
 
     // 所有节点均失败
-    server.log.error("All nodes exhausted or failed.");
+    server.log.error("所有节点都已耗尽或失败");
     reply.code(503).send({
         error: {
-            message: "No Copilot premium quota available across all nodes.",
+            message: "所有 Copilot 节点的配额都已耗尽或不可用",
             type: "service_unavailable",
-            details: lastError ? lastError.message : "Pool exhausted"
+            details: lastError ? lastError.message : "节点池耗尽"
         }
     });
 });
