@@ -78,6 +78,52 @@ services:
       retries: 3
       start_period: 30s
 
+  # --- 节点 4：账号 D ---
+  copilot-node-4:
+    build:
+      context: .
+      dockerfile: Dockerfile.copilot-api-src
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+    container_name: copilot-node-4
+    restart: unless-stopped
+    environment:
+      - HOST=0.0.0.0
+    volumes:
+      - copilot_data_node4:/root/.local/share/copilot-api
+    networks:
+      - copilot-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4141/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # --- 节点 5：账号 E ---
+  copilot-node-5:
+    build:
+      context: .
+      dockerfile: Dockerfile.copilot-api-src
+      args:
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+    container_name: copilot-node-5
+    restart: unless-stopped
+    environment:
+      - HOST=0.0.0.0
+    volumes:
+      - copilot_data_node5:/root/.local/share/copilot-api
+    networks:
+      - copilot-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4141/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   # --- 智能网关 ---
   smart-gateway:
     build: ./gateway
@@ -91,7 +137,7 @@ services:
       PORT: ${GATEWAY_CONTAINER_PORT:-3000}
       # 节点配置：通过环境变量注入，支持多个账号
       COPILOT_NODES: >-
-        [{"url": "http://copilot-node-1:4141", "token": "${TOKEN_ACCOUNT_1}"}, {"url": "http://copilot-node-2:4141", "token": "${TOKEN_ACCOUNT_2}"}, {"url": "http://copilot-node-3:4141", "token": "${TOKEN_ACCOUNT_3}"}]
+        [{"url": "http://copilot-node-1:4141", "token": "${TOKEN_ACCOUNT_1}"}, {"url": "http://copilot-node-2:4141", "token": "${TOKEN_ACCOUNT_2}"}, {"url": "http://copilot-node-3:4141", "token": "${TOKEN_ACCOUNT_3}"}, {"url": "http://copilot-node-4:4141", "token": "${TOKEN_ACCOUNT_4}"}, {"url": "http://copilot-node-5:4141", "token": "${TOKEN_ACCOUNT_5}"}]
       # 网关高级配置（可选）
       POLL_INTERVAL: ${POLL_INTERVAL:-300000}
       RETRY_LIMIT: ${RETRY_LIMIT:-3}
@@ -101,6 +147,10 @@ services:
       copilot-node-2:
         condition: service_healthy
       copilot-node-3:
+        condition: service_healthy
+      copilot-node-4:
+        condition: service_healthy
+      copilot-node-5:
         condition: service_healthy
     networks:
       - copilot-net
@@ -113,6 +163,10 @@ volumes:
   copilot_data_node2:
     driver: local
   copilot_data_node3:
+    driver: local
+  copilot_data_node4:
+    driver: local
+  copilot_data_node5:
     driver: local
 
 # 网络定义
