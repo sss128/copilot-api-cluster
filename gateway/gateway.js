@@ -13,7 +13,7 @@ const axios = require('axios');
 // 示例：[{"url": "http://node1:4141", "token": "ghp_xx"}, {"url": "http://node2:4141", "token": "ghp_yy"}]
 const NODES_CONFIG = process.env.COPILOT_NODES ? JSON.parse(process.env.COPILOT_NODES) : [];
 const PORT = process.env.PORT || 3000;
-const POLL_INTERVAL = 5 * 60 * 1000; // 5分钟轮询一次
+const POLL_INTERVAL = process.env.POLL_INTERVAL ? parseInt(process.env.POLL_INTERVAL) : 5 * 60 * 1000; // 从环境变量读取，默认5分钟
 const RETRY_LIMIT = 3; // 最大重试次数
 
 // --- 全局状态注册表 ---
@@ -29,7 +29,8 @@ let nodeRegistry = NODES_CONFIG.map((node, index) => ({
 }));
 
 // 当前活跃节点索引（主备模式的关键）
-let activeNodeIndex = 0;
+// 初始化为最后一个节点，实现反向调度
+let activeNodeIndex = NODES_CONFIG.length > 0 ? NODES_CONFIG.length - 1 : 0;
 
 const server = Fastify({
     logger: true,
@@ -116,8 +117,9 @@ function startScheduler() {
 }
 
 /**
- * 获取当前活跃节点（主备模式）
+ * 获取当前活跃节点（主备模式，反向调度）
  * 返回当前应该使用的节点，如果不活跃则尝试切换到下一个可用节点
+ * 优先选择索引较大的节点（从末尾开始）
  */
 function getActiveNode() {
     // 如果当前活跃节点可用，直接返回
@@ -127,13 +129,13 @@ function getActiveNode() {
         return nodeRegistry[activeNodeIndex];
     }
 
-    // 当前节点不可用，查找下一个可用节点
-    for (let i = 0; i < nodeRegistry.length; i++) {
-        const idx = (activeNodeIndex + i) % nodeRegistry.length;
-        const node = nodeRegistry[idx];
+    // 当前节点不可用，从后往前查找可用节点
+    // 从最后一个节点开始，向下查找
+    for (let i = nodeRegistry.length - 1; i >= 0; i--) {
+        const node = nodeRegistry[i];
         if (node && node.status === 'READY' && node.premiumRemaining > 0) {
-            activeNodeIndex = idx; // 更新活跃节点索引
-            server.log.info(`切换到活跃节点: ${node.id} (索引: ${idx})`);
+            activeNodeIndex = i; // 更新活跃节点索引
+            server.log.info(`切换到活跃节点: ${node.id} (索引: ${i})`);
             return node;
         }
     }
@@ -142,25 +144,38 @@ function getActiveNode() {
 }
 
 /**
- * 切换到下一个节点（故障转移）
+ * 切换到下一个节点（故障转移，反向调度）
  * @param {string} reason - 切换原因
  */
 function switchToNextNode(reason) {
     const originalIndex = activeNodeIndex;
 
-    // 寻找下一个可用节点
-    for (let i = 1; i < nodeRegistry.length; i++) {
-        const nextIndex = (activeNodeIndex + i) % nodeRegistry.length;
-        const nextNode = nodeRegistry[nextIndex];
-
-        if (nextNode && nextNode.status !== 'INVALID_TOKEN') {
-            activeNodeIndex = nextIndex;
+    // 从后往前寻找下一个可用节点（优先选择索引更大的节点）
+    // 从当前节点的前一个节点开始，一直查找到第一个节点
+    for (let i = originalIndex - 1; i >= 0; i--) {
+        const node = nodeRegistry[i];
+        if (node && node.status !== 'INVALID_TOKEN') {
+            activeNodeIndex = i;
             server.log.info(`故障转移: ${reason}`);
-            server.log.info(`从节点 ${originalIndex} 切换到节点 ${nextIndex} (${nextNode.id})`);
+            server.log.info(`从节点 ${originalIndex} 切换到节点 ${i} (${node.id})`);
 
             // 立即检查新节点的状态
-            syncNodeQuota(nextNode);
-            return nextNode;
+            syncNodeQuota(node);
+            return node;
+        }
+    }
+
+    // 如果前面的节点都不可用，再从最后一个节点开始查找
+    for (let i = nodeRegistry.length - 1; i > originalIndex; i--) {
+        const node = nodeRegistry[i];
+        if (node && node.status !== 'INVALID_TOKEN') {
+            activeNodeIndex = i;
+            server.log.info(`故障转移: ${reason}`);
+            server.log.info(`从节点 ${originalIndex} 切换到节点 ${i} (${node.id})`);
+
+            // 立即检查新节点的状态
+            syncNodeQuota(node);
+            return node;
         }
     }
 
@@ -187,9 +202,10 @@ server.get('/health', async () => {
     };
 });
 
-// 重置活跃节点到第一个可用节点（管理接口）
+// 重置活跃节点到最后一个可用节点（管理接口，反向调度）
 server.post('/admin/reset-active-node', async () => {
-    for (let i = 0; i < nodeRegistry.length; i++) {
+    // 从后往前查找，选择最后一个可用节点
+    for (let i = nodeRegistry.length - 1; i >= 0; i--) {
         const node = nodeRegistry[i];
         if (node && node.status === 'READY' && node.premiumRemaining > 0) {
             activeNodeIndex = i;
