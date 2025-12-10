@@ -15,6 +15,8 @@ const NODES_CONFIG = process.env.COPILOT_NODES ? JSON.parse(process.env.COPILOT_
 const PORT = process.env.PORT || 3000;
 const POLL_INTERVAL = process.env.POLL_INTERVAL ? parseInt(process.env.POLL_INTERVAL) : 5 * 60 * 1000; // 从环境变量读取，默认5分钟
 const RETRY_LIMIT = 3; // 最大重试次数
+const HEALTH_CHECK_TIMEOUT = 5000; // 健康检查超时时间（毫秒）
+const REQUEST_TIMEOUT = 30000; // 代理请求超时时间（毫秒）
 
 // --- 全局状态注册表 ---
 // 在内存中维护节点状态
@@ -22,10 +24,12 @@ let nodeRegistry = NODES_CONFIG.map((node, index) => ({
     id: `node-${index}`,
     url: node.url,
     token: node.token,
-    status: 'UNKNOWN', // 状态枚举: UNKNOWN, READY, DRAINED, OFFLINE, ERROR
+    status: 'UNKNOWN', // 状态枚举: UNKNOWN, READY, DRAINED, OFFLINE, ERROR, INVALID_TOKEN, RATE_LIMITED
     premiumRemaining: 0,
     lastCheck: 0,
-    failureCount: 0
+    failureCount: 0,
+    consecutiveFailures: 0, // 连续失败计数（用于快速故障检测）
+    lastHealthy: 0 // 最后一次健康的时间戳
 }));
 
 // 当前活跃节点索引（主备模式的关键）
@@ -40,6 +44,37 @@ const server = Fastify({
 // --- 核心功能函数 ---
 
 /**
+ * 检查节点是否可达（快速健康检查）
+ * 通过 /usage 端点判断节点是否在线
+ * @param {Object} node 节点对象
+ * @returns {boolean} 节点是否可达
+ */
+async function checkNodeReachable(node) {
+    try {
+        await axios.get(`${node.url}/usage`, {
+            headers: { 'Authorization': `Bearer ${node.token}` },
+            timeout: HEALTH_CHECK_TIMEOUT
+        });
+        return true;
+    } catch (error) {
+        // 网络错误（ECONNREFUSED, ETIMEDOUT 等）表示节点不可达
+        if (error.code === 'ECONNREFUSED' ||
+            error.code === 'ETIMEDOUT' ||
+            error.code === 'ENOTFOUND' ||
+            error.code === 'ECONNRESET' ||
+            error.code === 'EHOSTUNREACH') {
+            return false;
+        }
+        // HTTP 错误（如 401, 403, 500）表示节点可达但可能有其他问题
+        // 但节点本身是在线的
+        if (error.response) {
+            return true;
+        }
+        return false;
+    }
+}
+
+/**
  * 查询单个节点的配额情况
  * @param {Object} node 节点对象
  */
@@ -50,7 +85,7 @@ async function syncNodeQuota(node) {
         // 构造请求，透传 Token
         const response = await axios.get(`${node.url}/usage`, {
             headers: { 'Authorization': `Bearer ${node.token}` },
-            timeout: 10000 // 10秒超时
+            timeout: HEALTH_CHECK_TIMEOUT
         });
 
         const data = response.data;
@@ -75,6 +110,8 @@ async function syncNodeQuota(node) {
         node.premiumRemaining = remaining;
         node.lastCheck = Date.now();
         node.failureCount = 0;
+        node.consecutiveFailures = 0; // 重置连续失败计数
+        node.lastHealthy = Date.now();
 
         if (remaining > 0) {
             node.status = 'READY';
@@ -86,17 +123,50 @@ async function syncNodeQuota(node) {
 
     } catch (error) {
         node.failureCount++;
+        node.consecutiveFailures++;
         server.log.error(`Node ${node.id} sync failed: ${error.message}`);
 
         // 区分错误类型
-        if (error.response && error.response.status === 401) {
+        if (error.code === 'ECONNREFUSED' ||
+            error.code === 'ETIMEDOUT' ||
+            error.code === 'ENOTFOUND' ||
+            error.code === 'ECONNRESET' ||
+            error.code === 'EHOSTUNREACH') {
+            // 网络层错误，节点不可达
+            node.status = 'OFFLINE';
+            server.log.warn(`Node ${node.id} is OFFLINE (network error: ${error.code})`);
+        } else if (error.response && error.response.status === 401) {
             node.status = 'INVALID_TOKEN'; // Token 失效，无需重试
         } else if (error.response && error.response.status === 429) {
             node.status = 'RATE_LIMITED'; // 暂时被 GitHub 限流
+        } else if (error.response) {
+            // 有 HTTP 响应但是其他错误，节点在线但可能有问题
+            // 保持当前状态，不立即标记为 OFFLINE
+            server.log.warn(`Node ${node.id} returned HTTP ${error.response.status}`);
         } else {
-            node.status = 'OFFLINE'; // 网络或其他错误
+            node.status = 'OFFLINE'; // 其他未知网络错误
         }
     }
+}
+
+/**
+ * 判断节点是否可用于请求
+ * @param {Object} node 节点对象
+ * @returns {boolean} 节点是否可用
+ */
+function isNodeAvailable(node) {
+    // 节点必须是 READY 状态且有配额
+    if (node.status !== 'READY') {
+        return false;
+    }
+    if (node.premiumRemaining <= 0) {
+        return false;
+    }
+    // 如果连续失败超过 2 次，暂时不使用该节点
+    if (node.consecutiveFailures >= 2) {
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -107,13 +177,30 @@ function startScheduler() {
     server.log.info("Starting initial quota sweep...");
     Promise.all(nodeRegistry.map(syncNodeQuota));
 
-    // 2. 设置定时器
+    // 2. 设置定时器 - 常规配额检查
     setInterval(() => {
         server.log.info("Running periodic quota sweep...");
-        // 仅检查非永久失效的节点
+        // 仅检查非永久失效的节点（INVALID_TOKEN 除外）
         const activeNodes = nodeRegistry.filter(n => n.status !== 'INVALID_TOKEN');
         activeNodes.forEach(syncNodeQuota);
     }, POLL_INTERVAL);
+
+    // 3. 设置定时器 - 离线节点恢复检查（每30秒检查一次）
+    const RECOVERY_INTERVAL = 30000; // 30秒
+    setInterval(async () => {
+        const offlineNodes = nodeRegistry.filter(n => n.status === 'OFFLINE');
+        if (offlineNodes.length > 0) {
+            server.log.info(`检查 ${offlineNodes.length} 个离线节点是否恢复...`);
+            for (const node of offlineNodes) {
+                const reachable = await checkNodeReachable(node);
+                if (reachable) {
+                    server.log.info(`节点 ${node.id} 已恢复在线，重新检查配额...`);
+                    node.consecutiveFailures = 0;
+                    await syncNodeQuota(node);
+                }
+            }
+        }
+    }, RECOVERY_INTERVAL);
 }
 
 /**
@@ -123,9 +210,7 @@ function startScheduler() {
  */
 function getActiveNode() {
     // 如果当前活跃节点可用，直接返回
-    if (nodeRegistry[activeNodeIndex] &&
-        nodeRegistry[activeNodeIndex].status === 'READY' &&
-        nodeRegistry[activeNodeIndex].premiumRemaining > 0) {
+    if (nodeRegistry[activeNodeIndex] && isNodeAvailable(nodeRegistry[activeNodeIndex])) {
         return nodeRegistry[activeNodeIndex];
     }
 
@@ -133,7 +218,7 @@ function getActiveNode() {
     // 从最后一个节点开始，向下查找
     for (let i = nodeRegistry.length - 1; i >= 0; i--) {
         const node = nodeRegistry[i];
-        if (node && node.status === 'READY' && node.premiumRemaining > 0) {
+        if (node && isNodeAvailable(node)) {
             activeNodeIndex = i; // 更新活跃节点索引
             server.log.info(`切换到活跃节点: ${node.id} (索引: ${i})`);
             return node;
@@ -145,37 +230,62 @@ function getActiveNode() {
 
 /**
  * 切换到下一个节点（故障转移，反向调度）
+ * @param {Object} failedNode - 失败的节点（可选）
  * @param {string} reason - 切换原因
  */
-function switchToNextNode(reason) {
+async function switchToNextNode(failedNode, reason) {
     const originalIndex = activeNodeIndex;
 
+    // 如果传入了失败的节点，增加其失败计数
+    if (failedNode) {
+        failedNode.consecutiveFailures++;
+        server.log.info(`节点 ${failedNode.id} 连续失败次数: ${failedNode.consecutiveFailures}`);
+    }
+
     // 从后往前寻找下一个可用节点（优先选择索引更大的节点）
-    // 从当前节点的前一个节点开始，一直查找到第一个节点
+    // 先尝试当前节点之前的节点
     for (let i = originalIndex - 1; i >= 0; i--) {
         const node = nodeRegistry[i];
-        if (node && node.status !== 'INVALID_TOKEN') {
-            activeNodeIndex = i;
-            server.log.info(`故障转移: ${reason}`);
-            server.log.info(`从节点 ${originalIndex} 切换到节点 ${i} (${node.id})`);
+        if (node && node.status !== 'INVALID_TOKEN' && node.status !== 'OFFLINE') {
+            // 快速检查节点是否可达
+            const reachable = await checkNodeReachable(node);
+            if (reachable) {
+                activeNodeIndex = i;
+                server.log.info(`故障转移: ${reason}`);
+                server.log.info(`从节点 ${originalIndex} 切换到节点 ${i} (${node.id})`);
 
-            // 立即检查新节点的状态
-            syncNodeQuota(node);
-            return node;
+                // 立即检查新节点的状态
+                await syncNodeQuota(node);
+                if (isNodeAvailable(node)) {
+                    return node;
+                }
+            } else {
+                node.status = 'OFFLINE';
+                server.log.warn(`节点 ${node.id} 不可达，标记为 OFFLINE`);
+            }
         }
     }
 
     // 如果前面的节点都不可用，再从最后一个节点开始查找
     for (let i = nodeRegistry.length - 1; i > originalIndex; i--) {
         const node = nodeRegistry[i];
-        if (node && node.status !== 'INVALID_TOKEN') {
-            activeNodeIndex = i;
-            server.log.info(`故障转移: ${reason}`);
-            server.log.info(`从节点 ${originalIndex} 切换到节点 ${i} (${node.id})`);
+        if (node && node.status !== 'INVALID_TOKEN' && node.status !== 'OFFLINE') {
+            // 快速检查节点是否可达
+            const reachable = await checkNodeReachable(node);
+            if (reachable) {
+                activeNodeIndex = i;
+                server.log.info(`故障转移: ${reason}`);
+                server.log.info(`从节点 ${originalIndex} 切换到节点 ${i} (${node.id})`);
 
-            // 立即检查新节点的状态
-            syncNodeQuota(node);
-            return node;
+                // 立即检查新节点的状态
+                await syncNodeQuota(node);
+                if (isNodeAvailable(node)) {
+                    return node;
+                }
+            } else {
+                node.status = 'OFFLINE';
+                server.log.warn(`节点 ${node.id} 不可达，标记为 OFFLINE`);
+            }
         }
     }
 
@@ -188,16 +298,22 @@ function switchToNextNode(reason) {
 // 健康检查
 server.get('/health', async () => {
     const activeNode = nodeRegistry[activeNodeIndex];
+    const availableNodes = nodeRegistry.filter(n => isNodeAvailable(n));
     return {
-        status: 'ok',
+        status: availableNodes.length > 0 ? 'ok' : 'degraded',
         activeNodeIndex,
         activeNodeId: activeNode ? activeNode.id : null,
         mode: 'active-standby', // 标识当前模式
+        availableNodeCount: availableNodes.length,
+        totalNodeCount: nodeRegistry.length,
         nodes: nodeRegistry.map(n => ({
             id: n.id,
             status: n.status,
             quota: n.premiumRemaining,
-            isActive: n.id === (activeNode ? activeNode.id : null)
+            isActive: n.id === (activeNode ? activeNode.id : null),
+            consecutiveFailures: n.consecutiveFailures,
+            lastCheck: n.lastCheck ? new Date(n.lastCheck).toISOString() : null,
+            lastHealthy: n.lastHealthy ? new Date(n.lastHealthy).toISOString() : null
         }))
     };
 });
@@ -230,6 +346,7 @@ server.all('/v1/*', async (request, reply) => {
     let attempts = 0;
     let lastError = null;
     let currentNode = null;
+    const triedNodes = new Set(); // 记录已尝试过的节点，避免重复
 
     // 主备模式：始终从当前活跃节点开始
     while (attempts < nodeRegistry.length) {
@@ -239,6 +356,15 @@ server.all('/v1/*', async (request, reply) => {
             server.log.error("没有可用的活跃节点");
             break;
         }
+
+        // 避免重复尝试同一个节点
+        if (triedNodes.has(currentNode.id)) {
+            server.log.warn(`节点 ${currentNode.id} 已尝试过，跳过`);
+            // 标记为不可用，强制 getActiveNode 选择其他节点
+            currentNode.consecutiveFailures = 999;
+            continue;
+        }
+        triedNodes.add(currentNode.id);
 
         attempts++;
 
@@ -260,8 +386,13 @@ server.all('/v1/*', async (request, reply) => {
                 },
                 data: request.body,
                 responseType: 'stream',
+                timeout: REQUEST_TIMEOUT, // 添加超时
                 validateStatus: () => true // 允许所有状态码通过，手动处理
             });
+
+            // 请求成功到达节点，重置连续失败计数
+            currentNode.consecutiveFailures = 0;
+            currentNode.lastHealthy = Date.now();
 
             // 检查是否是业务层面的拒绝 (如额度耗尽)
             // 通常 GitHub 会返回 402, 403 或特定的 429
@@ -276,7 +407,7 @@ server.all('/v1/*', async (request, reply) => {
                 currentNode.status = 'DRAINED';
 
                 // 切换到下一个节点
-                const nextNode = switchToNextNode(`节点 ${currentNode.id} 配额耗尽`);
+                const nextNode = await switchToNextNode(null, `节点 ${currentNode.id} 配额耗尽`);
                 if (!nextNode) {
                     lastError = new Error('所有节点配额都已耗尽');
                     break;
@@ -284,6 +415,12 @@ server.all('/v1/*', async (request, reply) => {
 
                 // 继续下一次尝试
                 continue;
+            }
+
+            // 404 不是节点故障，正常透传给客户端
+            // 这可能是请求了不存在的模型或端点
+            if (proxyResponse.status === 404) {
+                server.log.info(`节点 ${currentNode.id} 返回 404，正常透传`);
             }
 
             // 如果成功 (2xx)，进行乐观扣减
@@ -303,16 +440,32 @@ server.all('/v1/*', async (request, reply) => {
             return reply.send(proxyResponse.data);
 
         } catch (error) {
-            server.log.warn(`节点 ${currentNode.id} 请求失败: ${error.message}`);
+            server.log.warn(`节点 ${currentNode.id} 请求失败: ${error.message} (code: ${error.code})`);
 
-            // 网络错误或其他异常
-            currentNode.failureCount++;
-            if (currentNode.failureCount >= 3) {
+            // 区分网络错误和其他错误
+            const isNetworkError = error.code === 'ECONNREFUSED' ||
+                                   error.code === 'ETIMEDOUT' ||
+                                   error.code === 'ENOTFOUND' ||
+                                   error.code === 'ECONNRESET' ||
+                                   error.code === 'EHOSTUNREACH' ||
+                                   error.code === 'ECONNABORTED';
+
+            if (isNetworkError) {
+                // 网络错误，节点不可达，立即标记为 OFFLINE
                 currentNode.status = 'OFFLINE';
+                currentNode.consecutiveFailures++;
+                server.log.error(`节点 ${currentNode.id} 网络不可达，标记为 OFFLINE`);
+            } else {
+                // 其他错误（如超时），增加失败计数
+                currentNode.failureCount++;
+                currentNode.consecutiveFailures++;
+                if (currentNode.consecutiveFailures >= 3) {
+                    currentNode.status = 'OFFLINE';
+                }
             }
 
             // 切换到下一个节点
-            const nextNode = switchToNextNode(`节点 ${currentNode.id} 发生错误: ${error.message}`);
+            const nextNode = await switchToNextNode(null, `节点 ${currentNode.id} 发生错误: ${error.message}`);
             if (!nextNode) {
                 lastError = error;
                 break;
