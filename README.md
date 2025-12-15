@@ -18,62 +18,124 @@
 ### 前置要求
 
 - Docker 和 Docker Compose
-- 至少一个有效的 GitHub Copilot 账号 Token（ghu_ 或 ghp_ 开头）
+- 至少一个有效的 GitHub Copilot 订阅账号
 
 ### 部署步骤
 
-1. **克隆或下载本项目**
+#### 1. 克隆项目
 
-2. **配置环境变量**
-   ```bash
-   cp .env.example .env
-   ```
-   编辑 `.env` 文件，填入你的 GitHub Copilot Token：
-   ```bash
-   TOKEN_ACCOUNT_1=ghu_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   TOKEN_ACCOUNT_2=ghu_yyyyyyyyyyyyyyyyyyyyyyyyyyyy
-   ```
-   > 注意：Token 可以从现有 VS Code 登录信息中提取，或使用 `copilot-api` 的 auth 命令获取
+```bash
+git clone <本项目地址>
+cd copilot-api-cluster
+```
 
-3. **启动服务**
-   ```bash
-   docker-compose up -d --build
-   ```
+#### 2. 首次部署 - 节点认证
 
-4. **验证部署**
-   - 健康检查：访问 `http://localhost:8080/health`
-   - 应返回 JSON 格式的节点状态信息
+首次部署需要为每个节点完成 GitHub 账号认证。**必须逐个节点进行认证**，不能同时启动所有节点。
 
-5. **配置客户端**
-   - **Cursor**：设置 Base URL 为 `http://localhost:8080/v1`
-   - **Claude Code**：配置相应的 API 端点
-   - **其他 OpenAI 兼容客户端**：使用 `http://localhost:8080/v1` 作为 API 地址
+**认证第一个节点：**
+
+```bash
+# 单独启动节点1
+docker-compose -f docker-compose.portainer.yml up -d copilot-node-1
+
+# 查看日志，获取认证链接
+docker-compose -f docker-compose.portainer.yml logs -f copilot-node-1
+```
+
+日志中会显示类似内容：
+```
+Please visit https://github.com/login/device
+and enter code: XXXX-XXXX
+```
+
+在**任意浏览器**中：
+1. 打开 https://github.com/login/device
+2. 输入日志中显示的验证码（如 `XXXX-XXXX`）
+3. 登录你的 GitHub Copilot 账号并授权
+
+认证成功后，日志会显示服务已启动，Token 会自动保存到 Docker volume 中。
+
+**认证其他节点：**
+
+重复上述步骤，依次认证其他节点（使用不同的 GitHub 账号）：
+
+```bash
+# 节点2
+docker-compose -f docker-compose.portainer.yml up -d copilot-node-2
+docker-compose -f docker-compose.portainer.yml logs -f copilot-node-2
+
+# 节点3
+docker-compose -f docker-compose.portainer.yml up -d copilot-node-3
+docker-compose -f docker-compose.portainer.yml logs -f copilot-node-3
+
+# 节点4
+docker-compose -f docker-compose.portainer.yml up -d copilot-node-4
+docker-compose -f docker-compose.portainer.yml logs -f copilot-node-4
+```
+
+> **注意**：每个节点应绑定不同的 GitHub Copilot 账号，以实现配额叠加。
+
+#### 3. 启动智能网关
+
+所有节点认证完成后，启动网关服务：
+
+```bash
+# 启动完整服务（包括网关）
+docker-compose -f docker-compose.portainer.yml up -d
+```
+
+#### 4. 验证部署
+
+```bash
+# 健康检查
+curl http://localhost:8080/health
+```
+
+应返回 JSON 格式的节点状态信息，包含各节点的配额和在线状态。
+
+#### 5. 配置客户端
+
+- **Cursor**：设置 Base URL 为 `http://localhost:8080/v1`
+- **Claude Code**：配置 API 端点为 `http://localhost:8080/v1`
+- **其他 OpenAI 兼容客户端**：使用 `http://localhost:8080/v1` 作为 API 地址
+
+### 后续启动
+
+认证信息保存在 Docker volume 中，后续重启无需重新认证：
+
+```bash
+# 停止所有服务
+docker-compose -f docker-compose.portainer.yml down
+
+# 启动所有服务（无需重新认证）
+docker-compose -f docker-compose.portainer.yml up -d
+```
+
+> **警告**：如果执行 `docker-compose down -v` 会删除 volume，导致认证信息丢失，需要重新认证。
 
 ## 配置说明
 
-### 环境变量
+### 环境变量（可选）
 
-| 变量名 | 说明 | 示例 |
-|--------|------|------|
-| `TOKEN_ACCOUNT_1` | 第一个 GitHub Copilot Token | `ghu_xxx...` |
-| `TOKEN_ACCOUNT_2` | 第二个 GitHub Copilot Token | `ghu_yyy...` |
-| （可选添加更多） | | |
+网关支持通过环境变量进行高级配置，可在启动时传入：
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `GATEWAY_PORT` | 8080 | 网关对外暴露的端口 |
+| `POLL_INTERVAL` | 300000 | 配额轮询间隔（毫秒，默认5分钟） |
+| `RETRY_LIMIT` | 3 | 请求失败重试次数 |
+
+示例：
+```bash
+GATEWAY_PORT=9000 docker-compose -f docker-compose.portainer.yml up -d
+```
 
 ### Docker Compose 配置
 
-- **智能网关**：运行在 `localhost:8080`
+- **智能网关**：默认运行在 `localhost:8080`
 - **Copilot 节点**：内部端口 `4141`，不对外暴露
-- **数据持久化**：节点数据保存在 `./data/nodeX/` 目录
-
-### 网关配置参数
-
-网关支持以下环境变量（在 `docker-compose.yml` 中配置）：
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `PORT` | 3000 | 网关监听端口 |
-| `POLL_INTERVAL` | 300000 (5分钟) | 配额轮询间隔（毫秒） |
-| `RETRY_LIMIT` | 3 | 请求失败重试次数 |
+- **数据持久化**：认证信息保存在 Docker 命名卷中（`copilot_data_node1` 等）
 
 ## 工作原理
 
@@ -85,14 +147,15 @@
 ### 路由策略（主备故障转移模式）
 ⚠️ **重要**：本系统采用主备故障转移模式，而非负载均衡，以避免触发 GitHub 风控。
 
-1. **顺序使用**：始终优先使用第一个可用节点（主节点），只有在其配额耗尽或故障时才切换到下一个节点
-2. **单账号活跃**：在任何时刻，只有一个账号在 active 状态，避免 IP 下多账号并发请求
+1. **反向调度**：优先使用索引最大的节点（如节点4），只有在其配额耗尽或故障时才切换到下一个节点
+2. **单账号活跃**：在任何时刻，只有一个账号在 active 状态，避免同一 IP 下多账号并发请求
 3. **故障转移**：仅以下情况触发切换：
    - 配额耗尽（HTTP 402/403/429）
    - 网络错误或超时
    - 节点离线
-4. **顺序切换**：节点切换遵循固定顺序（0→1→2→...→0）
+4. **切换顺序**：节点切换遵循反向顺序（4→3→2→1→4）
 5. **乐观扣减**：每次成功请求后本地扣减配额计数
+6. **离线恢复**：每 30 秒检查离线节点是否恢复
 
 ### 为何使用主备模式？
 
@@ -123,7 +186,7 @@ GET /health
 ```
 POST /admin/reset-active-node
 ```
-手动重置活跃节点到第一个可用节点。用于紧急情况下的节点重置。
+手动重置活跃节点到最后一个（索引最大的）可用节点。用于紧急情况下的节点重置。
 
 ### Copilot API 代理
 ```
@@ -156,16 +219,17 @@ docker-compose logs -f copilot-node-1
 ## 扩展与定制
 
 ### 添加更多节点
-1. 在 `.env` 中添加新的 Token
-2. 在 `docker-compose.yml` 中添加新的 `copilot-node-N` 服务
-3. 更新 `smart-gateway` 服务的 `COPILOT_NODES` 环境变量
-4. 重启服务：`docker-compose up -d`
+
+1. 在 `docker-compose.portainer.yml` 中复制一个节点配置，修改名称和卷名
+2. 启动新节点并完成 GitHub 认证（参见"首次部署"步骤）
+3. 更新 `smart-gateway` 服务的 `COPILOT_NODES` 环境变量，添加新节点
+4. 重启网关：`docker-compose -f docker-compose.portainer.yml restart smart-gateway`
 
 ### 修改轮询间隔
-在 `docker-compose.yml` 中修改 `smart-gateway` 的环境变量：
-```yaml
-environment:
-  - POLL_INTERVAL=600000  # 10分钟
+
+启动时通过环境变量设置：
+```bash
+POLL_INTERVAL=600000 docker-compose -f docker-compose.portainer.yml up -d
 ```
 
 ### 开发模式
@@ -185,26 +249,31 @@ COPILOT_NODES='[{"url":"http://localhost:4141","token":"ghu_xxx"}]' node gateway
 
 ### 常见问题
 
-1. **健康检查返回空节点列表**
-   - 检查 `.env` 文件中的 Token 是否正确
-   - 查看网关日志：`docker-compose logs smart-gateway`
+1. **认证失败或超时**
+   - 确保网络能访问 `github.com`
+   - 检查是否在规定时间内完成了浏览器授权
+   - 重启节点重新获取认证码：`docker-compose -f docker-compose.portainer.yml restart copilot-node-1`
 
-2. **所有节点显示 OFFLINE**
+2. **健康检查返回空节点列表**
+   - 检查节点是否完成认证
+   - 查看网关日志：`docker-compose -f docker-compose.portainer.yml logs smart-gateway`
+
+3. **所有节点显示 OFFLINE**
    - 检查网络连接
    - 确认 Docker 容器正常运行
-   - 查看节点日志：`docker-compose logs copilot-node-1`
+   - 查看节点日志：`docker-compose -f docker-compose.portainer.yml logs copilot-node-1`
 
-3. **客户端连接失败**
+4. **客户端连接失败**
    - 确认网关端口 `8080` 可访问
    - 检查防火墙设置
    - 验证客户端配置的 Base URL
 
-4. **配额更新延迟**
+5. **配额更新延迟**
    - 默认轮询间隔为 5 分钟
    - 可通过 `POLL_INTERVAL` 调整
    - 实际配额耗尽时会立即触发刷新
 
-5. **频繁切换节点**
+6. **频繁切换节点**
    - 检查是否为负载均衡模式（不正确）
    - 确认是否为主备模式（正确）
    - 查看日志中的 "主备模式" 标识
@@ -212,15 +281,15 @@ COPILOT_NODES='[{"url":"http://localhost:4141","token":"ghu_xxx"}]' node gateway
 ### 日志级别
 网关使用 Fastify 内置日志，可通过环境变量调整：
 ```bash
-# 在 docker-compose.yml 中添加
-- LOG_LEVEL=debug
+LOG_LEVEL=debug docker-compose -f docker-compose.portainer.yml up -d
 ```
 
 ## 安全注意事项
 
-1. **Token 保护**
-   - `.env` 文件包含敏感信息，不要提交到版本控制
-   - 生产环境使用 Docker Secrets 或 Kubernetes Secrets
+1. **认证数据保护**
+   - 认证信息保存在 Docker volume 中，请勿随意删除
+   - 不要将 volume 数据提交到版本控制
+   - 生产环境建议定期备份 volume
 
 2. **网络隔离**
    - Copilot 节点不对外暴露端口
