@@ -9,9 +9,21 @@ const Fastify = require('fastify');
 const axios = require('axios');
 
 // --- 配置区域 ---
-// 通过环境变量注入配置，格式为 JSON 字符串
-// 示例：[{"url": "http://node1:4141", "token": "ghp_xx"}, {"url": "http://node2:4141", "token": "ghp_yy"}]
-const NODES_CONFIG = process.env.COPILOT_NODES ? JSON.parse(process.env.COPILOT_NODES) : [];
+// 方式1：COPILOT_NODES 环境变量（JSON）- 完整控制每个节点
+// 方式2：NODE_COUNT 环境变量 - 简化配置，自动生成 http://copilot-node-{i}:4141
+function buildNodesConfig() {
+    if (process.env.COPILOT_NODES) {
+        return JSON.parse(process.env.COPILOT_NODES);
+    }
+    const nodeCount = parseInt(process.env.NODE_COUNT) || 0;
+    const nodes = [];
+    for (let i = 1; i <= nodeCount; i++) {
+        nodes.push({ url: `http://copilot-node-${i}:4141`, token: '' });
+    }
+    if (nodeCount > 0) console.log(`[简化模式] 自动生成 ${nodeCount} 个节点`);
+    return nodes;
+}
+const NODES_CONFIG = buildNodesConfig();
 const PORT = process.env.PORT || 3000;
 const POLL_INTERVAL = process.env.POLL_INTERVAL ? parseInt(process.env.POLL_INTERVAL) : 5 * 60 * 1000; // 从环境变量读取，默认5分钟
 const RETRY_LIMIT = 3; // 最大重试次数
