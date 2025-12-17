@@ -41,16 +41,6 @@ services:
     container_name: copilot-node-3
     volumes: [copilot_data_node3:/root/.local/share/copilot-api]
 
-  copilot-node-4:
-    <<: *copilot-node-template
-    container_name: copilot-node-4
-    volumes: [copilot_data_node4:/root/.local/share/copilot-api]
-
-  copilot-node-5:
-    <<: *copilot-node-template
-    container_name: copilot-node-5
-    volumes: [copilot_data_node5:/root/.local/share/copilot-api]
-
   # ===== 智能网关 =====
   smart-gateway:
     build: ./gateway
@@ -61,7 +51,7 @@ services:
     environment:
       PORT: ${GATEWAY_CONTAINER_PORT:-3000}
       # 简化配置：只需设置节点数量，网关自动生成节点URL
-      NODE_COUNT: 5
+      NODE_COUNT: 3
       POLL_INTERVAL: ${POLL_INTERVAL:-300000}
       RETRY_LIMIT: ${RETRY_LIMIT:-3}
     depends_on:
@@ -71,10 +61,6 @@ services:
         condition: service_healthy
       copilot-node-3:
         condition: service_healthy
-      copilot-node-4:
-        condition: service_healthy
-      copilot-node-5:
-        condition: service_healthy
     networks:
       - copilot-net
 
@@ -83,8 +69,6 @@ volumes:
   copilot_data_node1:
   copilot_data_node2:
   copilot_data_node3:
-  copilot_data_node4:
-  copilot_data_node5:
 
 networks:
   copilot-net:
