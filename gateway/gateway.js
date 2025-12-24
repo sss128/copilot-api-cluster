@@ -10,43 +10,62 @@ const axios = require('axios');
 
 // --- 配置区域 ---
 // 方式1：COPILOT_NODES 环境变量（JSON）- 完整控制每个节点
-// 方式2：NODE_COUNT 环境变量 - 简化配置，自动生成 http://copilot-node-{i}:4141
-function buildNodesConfig() {
+// 方式2：自动探测模式 - 尝试连接 copilot-node-1, copilot-node-2... 直到连不上
+const MAX_NODE_PROBE = 20; // 最多探测20个节点
+
+async function discoverNodes() {
     if (process.env.COPILOT_NODES) {
-        return JSON.parse(process.env.COPILOT_NODES);
+        const nodes = JSON.parse(process.env.COPILOT_NODES);
+        console.log(`[显式配置] 加载 ${nodes.length} 个节点`);
+        return nodes;
     }
-    const nodeCount = parseInt(process.env.NODE_COUNT) || 0;
+
+    console.log('[自动探测] 开始发现节点...');
     const nodes = [];
-    for (let i = 1; i <= nodeCount; i++) {
-        nodes.push({ url: `http://copilot-node-${i}:4141`, token: '' });
+    let consecutiveNotFound = 0; // 连续未找到计数
+
+    for (let i = 1; i <= MAX_NODE_PROBE; i++) {
+        const url = `http://copilot-node-${i}:4141`;
+        try {
+            await axios.get(url, { timeout: 2000 });
+            nodes.push({ url, token: '' });
+            console.log(`[自动探测] 发现节点 ${i}: ${url}`);
+            consecutiveNotFound = 0; // 重置计数
+        } catch (error) {
+            if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+                consecutiveNotFound++;
+                console.log(`[自动探测] 节点 ${i} 不存在，跳过`);
+                // 连续3个节点不存在才停止探测
+                if (consecutiveNotFound >= 3) {
+                    console.log(`[自动探测] 连续 ${consecutiveNotFound} 个节点不存在，停止探测`);
+                    break;
+                }
+                continue;
+            }
+            // 其他错误（如超时、HTTP错误）说明节点存在但可能有问题，继续添加
+            nodes.push({ url, token: '' });
+            console.log(`[自动探测] 发现节点 ${i}: ${url} (响应异常: ${error.code || error.message})`);
+            consecutiveNotFound = 0;
+        }
     }
-    if (nodeCount > 0) console.log(`[简化模式] 自动生成 ${nodeCount} 个节点`);
+
+    console.log(`[自动探测] 共发现 ${nodes.length} 个节点`);
     return nodes;
 }
-const NODES_CONFIG = buildNodesConfig();
+
+// 初始为空，启动时填充
+let NODES_CONFIG = [];
 const PORT = process.env.PORT || 3000;
 const POLL_INTERVAL = process.env.POLL_INTERVAL ? parseInt(process.env.POLL_INTERVAL) : 5 * 60 * 1000; // 从环境变量读取，默认5分钟
-const RETRY_LIMIT = 3; // 最大重试次数
 const HEALTH_CHECK_TIMEOUT = 5000; // 健康检查超时时间（毫秒）
 const REQUEST_TIMEOUT = 30000; // 代理请求超时时间（毫秒）
 
 // --- 全局状态注册表 ---
-// 在内存中维护节点状态
-let nodeRegistry = NODES_CONFIG.map((node, index) => ({
-    id: `node-${index}`,
-    url: node.url,
-    token: node.token,
-    status: 'UNKNOWN', // 状态枚举: UNKNOWN, READY, DRAINED, OFFLINE, ERROR, INVALID_TOKEN, RATE_LIMITED
-    premiumRemaining: 0,
-    lastCheck: 0,
-    failureCount: 0,
-    consecutiveFailures: 0, // 连续失败计数（用于快速故障检测）
-    lastHealthy: 0 // 最后一次健康的时间戳
-}));
+// 初始为空，启动时填充
+let nodeRegistry = [];
 
 // 当前活跃节点索引（主备模式的关键）
-// 初始化为最后一个节点，实现反向调度
-let activeNodeIndex = NODES_CONFIG.length > 0 ? NODES_CONFIG.length - 1 : 0;
+let activeNodeIndex = 0;
 
 const server = Fastify({
     logger: true,
@@ -513,6 +532,29 @@ function checkIsQuotaError(response) {
 // 启动服务
 const start = async () => {
     try {
+        // 先发现节点
+        NODES_CONFIG = await discoverNodes();
+
+        // 初始化节点注册表
+        nodeRegistry = NODES_CONFIG.map((node, index) => ({
+            id: `node-${index + 1}`,
+            url: node.url,
+            token: node.token,
+            status: 'UNKNOWN',
+            premiumRemaining: 0,
+            lastCheck: 0,
+            failureCount: 0,
+            consecutiveFailures: 0,
+            lastHealthy: 0
+        }));
+
+        // 设置活跃节点索引（反向调度，从最后一个开始）
+        activeNodeIndex = nodeRegistry.length > 0 ? nodeRegistry.length - 1 : 0;
+
+        if (nodeRegistry.length === 0) {
+            console.error('[错误] 未发现任何可用节点，网关将以降级模式运行');
+        }
+
         await server.listen({ port: PORT, host: '0.0.0.0' });
         startScheduler();
     } catch (err) {
