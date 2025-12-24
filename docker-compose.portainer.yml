@@ -1,5 +1,5 @@
 # Portainer 部署配置
-# 新增节点：复制 copilot-node-X 块，改数字即可（无需改 volumes 区域）
+# 新增节点：复制 copilot-node-X 块，改数字，并在 volumes 区域添加对应卷
 
 version: '3.8'
 
@@ -43,3 +43,8 @@ services:
 
 networks:
   copilot-net:
+
+# 命名卷（新增节点需在此添加对应卷）
+volumes:
+  data-2:
+  data-3:
