@@ -1,6 +1,5 @@
-# Portainer 部署配置 - 支持环境变量
-# 使用命名卷进行数据持久化，所有关键配置均可通过环境变量自定义
-# 新增节点：复制任意 copilot-node-X 块，修改数字即可
+# Portainer 部署配置
+# 新增节点：复制 copilot-node-X 块，改数字即可（无需改 volumes 区域）
 
 version: '3.8'
 
@@ -25,50 +24,25 @@ x-copilot-node: &copilot-node-template
     start_period: 30s
 
 services:
-  # ===== Copilot 节点（新增节点只需复制下面3行并改数字）=====
-  copilot-node-1:
-    <<: *copilot-node-template
-    container_name: copilot-node-1
-    volumes: [copilot_data_node1:/root/.local/share/copilot-api]
-
-  copilot-node-2:
-    <<: *copilot-node-template
-    container_name: copilot-node-2
-    volumes: [copilot_data_node2:/root/.local/share/copilot-api]
-
-  copilot-node-3:
-    <<: *copilot-node-template
-    container_name: copilot-node-3
-    volumes: [copilot_data_node3:/root/.local/share/copilot-api]
+  # ===== Copilot 节点 =====
+  # 新增节点：复制下面的模板，把 N 替换成新数字
+  # --- 复制开始 ---
+  copilot-node-1: { <<: *copilot-node-template, ports: ["4141:4141"], volumes: ["data-1:/root/.local/share/copilot-api"] }
+  # --- 复制结束 ---
+  copilot-node-2: { <<: *copilot-node-template, ports: ["4142:4141"], volumes: ["data-2:/root/.local/share/copilot-api"] }
+  copilot-node-3: { <<: *copilot-node-template, ports: ["4143:4141"], volumes: ["data-3:/root/.local/share/copilot-api"] }
 
   # ===== 智能网关 =====
   smart-gateway:
     build: ./gateway
-    container_name: smart-gateway
     restart: always
-    ports:
-      - "${GATEWAY_PORT:-8080}:3000"
+    ports: ["${GATEWAY_PORT:-8080}:3000"]
     environment:
-      PORT: ${GATEWAY_CONTAINER_PORT:-3000}
-      # 简化配置：只需设置节点数量，网关自动生成节点URL
-      NODE_COUNT: 3
+      PORT: 3000
+      NODE_COUNT: ${NODE_COUNT:-3}
       POLL_INTERVAL: ${POLL_INTERVAL:-300000}
-      RETRY_LIMIT: ${RETRY_LIMIT:-3}
-    depends_on:
-      copilot-node-1:
-        condition: service_healthy
-      copilot-node-2:
-        condition: service_healthy
-      copilot-node-3:
-        condition: service_healthy
     networks:
       - copilot-net
-
-# 命名卷（新增节点需在此添加对应卷）
-volumes:
-  copilot_data_node1:
-  copilot_data_node2:
-  copilot_data_node3:
 
 networks:
   copilot-net:
