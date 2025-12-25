@@ -31,10 +31,11 @@ x-copilot-node: &copilot-node-template
 
 services:
   # ===== Copilot 节点 =====
-  # 新增节点：复制下面的模板，把 N 替换成新数字
-  node-1: { <<: *copilot-node-template, ports: ["4141:4141"], volumes: ["data-1:/root/.local/share/copilot-api"] }
-  node-2: { <<: *copilot-node-template, ports: ["4142:4141"], volumes: ["data-2:/root/.local/share/copilot-api"] }
-  node-3: { <<: *copilot-node-template, ports: ["4143:4141"], volumes: ["data-3:/root/.local/share/copilot-api"] }
+  # 新增节点：复制一行，改数字即可（volumes 会自动创建）
+  node-1: { <<: *copilot-node-template, container_name: copilot-node-1, ports: ["4141:4141"], volumes: ["copilot-data-1:/root/.local/share/copilot-api"] }
+  node-2: { <<: *copilot-node-template, container_name: copilot-node-2, ports: ["4142:4141"], volumes: ["copilot-data-2:/root/.local/share/copilot-api"] }
+  node-3: { <<: *copilot-node-template, container_name: copilot-node-3, ports: ["4143:4141"], volumes: ["copilot-data-3:/root/.local/share/copilot-api"] }
+  node-4: { <<: *copilot-node-template, container_name: copilot-node-4, ports: ["4144:4141"], volumes: ["copilot-data-4:/root/.local/share/copilot-api"] }
 
   # ===== 智能网关 =====
   # 网关通过 Docker API 自动发现带 copilot.node=true label 的容器
@@ -56,6 +57,7 @@ networks:
 
 # 命名卷（新增节点需在此添加对应卷）
 volumes:
-  data-1:
-  data-2:
-  data-3:
+  copilot-data-1:
+  copilot-data-2:
+  copilot-data-3:
+  copilot-data-4:
