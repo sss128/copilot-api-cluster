@@ -32,6 +32,7 @@ x-copilot-node: &copilot-node-template
 services:
   # ===== Copilot 节点 =====
   # 新增节点：复制下面的模板，把 N 替换成新数字
+  node-1: { <<: *copilot-node-template, ports: ["4141:4141"], volumes: ["data-1:/root/.local/share/copilot-api"] }
   node-2: { <<: *copilot-node-template, ports: ["4142:4141"], volumes: ["data-2:/root/.local/share/copilot-api"] }
   node-3: { <<: *copilot-node-template, ports: ["4143:4141"], volumes: ["data-3:/root/.local/share/copilot-api"] }
 
@@ -55,5 +56,6 @@ networks:
 
 # 命名卷（新增节点需在此添加对应卷）
 volumes:
+  data-1:
   data-2:
   data-3:
