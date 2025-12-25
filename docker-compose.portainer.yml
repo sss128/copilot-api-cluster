@@ -23,7 +23,7 @@ x-copilot-node: &copilot-node-template
   healthcheck:
     # 检查服务可用且配额未耗尽 (remaining > 0)
     test: ["CMD-SHELL", "curl -sf http://localhost:4141/usage | grep -q '\"remaining\":[1-9]'"]
-    interval: 30s
+    interval: 5m
     timeout: 10s
     retries: 3
     start_period: 30s
