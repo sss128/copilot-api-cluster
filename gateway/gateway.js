@@ -30,14 +30,14 @@ function extractNodeName(url) {
     }
 }
 
-async function discoverNodes() {
+async function discoverNodes(silent = false) {
     if (process.env.COPILOT_NODES) {
         const nodes = JSON.parse(process.env.COPILOT_NODES);
-        console.log(`[显式配置] 加载 ${nodes.length} 个节点`);
+        if (!silent) console.log(`[显式配置] 加载 ${nodes.length} 个节点`);
         return nodes;
     }
 
-    console.log('[Docker API] 开始发现节点...');
+    if (!silent) console.log('[Docker API] 开始发现节点...');
     const nodes = [];
 
     try {
@@ -51,13 +51,22 @@ async function discoverNodes() {
             if (serviceName) {
                 const url = `http://${serviceName}:4141`;
                 nodes.push({ url, token: '', name: serviceName });
-                console.log(`[Docker API] 发现节点: ${serviceName} -> ${url}`);
+                if (!silent) {
+                    // 查找该节点在 registry 中的状态
+                    const existingNode = nodeRegistry.find(n => n.url === url);
+                    const statusTag = existingNode ? ` [${existingNode.status}]` : '';
+                    console.log(`[Docker API] 发现节点: ${serviceName} -> ${url}${statusTag}`);
+                }
             } else {
                 // 回退到容器名（去掉开头的 /）
                 const name = container.Names[0].replace(/^\//, '');
                 const url = `http://${name}:4141`;
                 nodes.push({ url, token: '', name });
-                console.log(`[Docker API] 发现节点: ${name} -> ${url}`);
+                if (!silent) {
+                    const existingNode = nodeRegistry.find(n => n.url === url);
+                    const statusTag = existingNode ? ` [${existingNode.status}]` : '';
+                    console.log(`[Docker API] 发现节点: ${name} -> ${url}${statusTag}`);
+                }
             }
         }
     } catch (error) {
@@ -69,12 +78,12 @@ async function discoverNodes() {
                 const url = urlPart.includes('://') ? urlPart : `http://${urlPart}`;
                 const name = extractNodeName(url);
                 nodes.push({ url, token: '', name });
-                console.log(`[回退配置] 加载节点: ${url}`);
+                if (!silent) console.log(`[回退配置] 加载节点: ${url}`);
             }
         }
     }
 
-    console.log(`[节点发现] 共发现 ${nodes.length} 个节点`);
+    if (!silent) console.log(`[节点发现] 共发现 ${nodes.length} 个节点`);
     return nodes;
 }
 
@@ -294,11 +303,21 @@ function startScheduler() {
     const DISCOVERY_INTERVAL = 60000; // 60秒
     setInterval(async () => {
         try {
-            const newNodes = await discoverNodes();
+            const newNodes = await discoverNodes(true); // silent 模式，不打印重复日志
             const existingUrls = new Set(nodeRegistry.map(n => n.url));
+
+            // 统计已存在节点的状态
+            const existingNodeStats = nodeRegistry.reduce((acc, n) => {
+                acc[n.status] = (acc[n.status] || 0) + 1;
+                return acc;
+            }, {});
+
+            // 仅在有新节点或状态变化时打印详细日志
+            let hasNewNodes = false;
 
             for (const node of newNodes) {
                 if (!existingUrls.has(node.url)) {
+                    hasNewNodes = true;
                     const newNode = {
                         id: node.name || extractNodeName(node.url),  // 使用节点名称作为 ID
                         url: node.url,
@@ -315,6 +334,11 @@ function startScheduler() {
                     // 立即检查新节点配额
                     syncNodeQuota(newNode);
                 }
+            }
+
+            // 仅在有新节点时打印状态摘要
+            if (hasNewNodes) {
+                server.log.info(`[节点状态] ${JSON.stringify(existingNodeStats)}`);
             }
         } catch (err) {
             server.log.error(`[动态发现] 失败: ${err.message}`);
