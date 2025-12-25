@@ -80,5 +80,5 @@ docker run --auth copilot-api
 - `POST /v1/chat/completions`: OpenAI 兼容的聊天端点
 
 ## 开发注意事项
-- **版本更新**: 修改 `gateway/gateway.js` 后，必须同时更新 `gateway/package.json` 中的 `version` 字段，否则 Docker 镜像不会重新构建
-- **镜像版本**: `docker-compose.portainer.yml` 中的网关镜像版本 (`image: copilot-api-cluster-gateway:vX.X.X`) 建议与 package.json 版本保持一致
+- **网关版本更新**: 修改 `gateway/gateway.js` 后，必须同时更新 `gateway/package.json` 中的 `version` 字段，并同步更新 `docker-compose.portainer.yml` 中的 `image: copilot-api-cluster-gateway:vX.X.X`
+- **节点版本更新**: 修改 `Dockerfile.copilot-api-src` 或节点相关配置后，需要更新 `docker-compose.portainer.yml` 中模板的 `image: copilot-api-node:vX.X.X`
