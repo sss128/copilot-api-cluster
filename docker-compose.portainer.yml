@@ -12,7 +12,7 @@ x-copilot-node: &copilot-node-template
     args:
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
-  image: copilot-api-node:v1.0.0
+  image: copilot-api-node:v0.7.0
   restart: unless-stopped
   environment:
     - HOST=0.0.0.0
