@@ -118,14 +118,17 @@ async function checkNodeReachable(node) {
  * @param {Object} node 节点对象
  */
 async function syncNodeQuota(node) {
+    server.log.info(`[syncNodeQuota] 开始同步节点 ${node.id} (${node.url})`);
     try {
-        server.log.debug(`Syncing quota for ${node.id} (${node.url})...`);
+        server.log.info(`[syncNodeQuota] 发送请求到 ${node.url}/usage ...`);
 
         // 构造请求，透传 Token
         const response = await axios.get(`${node.url}/usage`, {
             headers: { 'Authorization': `Bearer ${node.token}` },
             timeout: HEALTH_CHECK_TIMEOUT
         });
+
+        server.log.info(`[syncNodeQuota] 节点 ${node.id} 响应状态: ${response.status}`);
 
         const data = response.data;
 
@@ -161,9 +164,9 @@ async function syncNodeQuota(node) {
         }
 
     } catch (error) {
+        server.log.error(`[syncNodeQuota] 节点 ${node.id} 请求失败: ${error.message} (code: ${error.code})`);
         node.failureCount++;
         node.consecutiveFailures++;
-        server.log.error(`Node ${node.id} sync failed: ${error.message}`);
 
         // 区分错误类型
         if (error.code === 'ECONNREFUSED' ||
@@ -213,8 +216,22 @@ function isNodeAvailable(node) {
  */
 function startScheduler() {
     // 1. 立即执行一次全量扫描
-    server.log.info("Starting initial quota sweep...");
-    Promise.all(nodeRegistry.map(syncNodeQuota));
+    server.log.info(`[startScheduler] 开始初始配额扫描，节点数量: ${nodeRegistry.length}`);
+
+    if (nodeRegistry.length === 0) {
+        server.log.warn(`[startScheduler] 没有节点需要扫描`);
+        return;
+    }
+
+    server.log.info(`[startScheduler] 节点列表: ${nodeRegistry.map(n => n.url).join(', ')}`);
+
+    Promise.all(nodeRegistry.map(syncNodeQuota))
+        .then(() => {
+            server.log.info("Initial quota sweep completed");
+        })
+        .catch((err) => {
+            server.log.error(`Initial quota sweep failed: ${err.message}`);
+        });
 
     // 2. 设置定时器 - 常规配额检查
     setInterval(() => {
@@ -240,6 +257,37 @@ function startScheduler() {
             }
         }
     }, RECOVERY_INTERVAL);
+
+    // 4. 设置定时器 - 动态发现新节点（每60秒检查一次）
+    const DISCOVERY_INTERVAL = 60000; // 60秒
+    setInterval(async () => {
+        try {
+            const newNodes = await discoverNodes();
+            const existingUrls = new Set(nodeRegistry.map(n => n.url));
+
+            for (const node of newNodes) {
+                if (!existingUrls.has(node.url)) {
+                    const newNode = {
+                        id: `node-${nodeRegistry.length + 1}`,
+                        url: node.url,
+                        token: node.token,
+                        status: 'UNKNOWN',
+                        premiumRemaining: 0,
+                        lastCheck: 0,
+                        failureCount: 0,
+                        consecutiveFailures: 0,
+                        lastHealthy: 0
+                    };
+                    nodeRegistry.push(newNode);
+                    server.log.info(`[动态发现] 新增节点: ${newNode.id} (${newNode.url})`);
+                    // 立即检查新节点配额
+                    syncNodeQuota(newNode);
+                }
+            }
+        } catch (err) {
+            server.log.error(`[动态发现] 失败: ${err.message}`);
+        }
+    }, DISCOVERY_INTERVAL);
 }
 
 /**
@@ -561,9 +609,12 @@ const start = async () => {
 
         if (nodeRegistry.length === 0) {
             console.error('[错误] 未发现任何可用节点，网关将以降级模式运行');
+        } else {
+            console.log(`[启动] 已注册 ${nodeRegistry.length} 个节点`);
         }
 
         await server.listen({ port: PORT, host: '0.0.0.0' });
+        console.log(`[启动] 服务已启动，开始调度器...`);
         startScheduler();
     } catch (err) {
         server.log.error(err);
