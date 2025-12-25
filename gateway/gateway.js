@@ -14,6 +14,22 @@ const Docker = require('dockerode');
 // 方式2：Docker API 自动发现 - 查找带 copilot.node=true label 的容器
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
+/**
+ * 从 URL 中提取节点名称作为 ID
+ * @param {string} url 节点 URL
+ * @returns {string} 节点名称
+ */
+function extractNodeName(url) {
+    try {
+        const urlObj = new URL(url);
+        // hostname 可能是 node-2, node-3 等
+        return urlObj.hostname;
+    } catch {
+        // 如果 URL 解析失败，返回整个 URL
+        return url;
+    }
+}
+
 async function discoverNodes() {
     if (process.env.COPILOT_NODES) {
         const nodes = JSON.parse(process.env.COPILOT_NODES);
@@ -34,13 +50,13 @@ async function discoverNodes() {
             const serviceName = container.Labels['com.docker.compose.service'];
             if (serviceName) {
                 const url = `http://${serviceName}:4141`;
-                nodes.push({ url, token: '' });
+                nodes.push({ url, token: '', name: serviceName });
                 console.log(`[Docker API] 发现节点: ${serviceName} -> ${url}`);
             } else {
                 // 回退到容器名（去掉开头的 /）
                 const name = container.Names[0].replace(/^\//, '');
                 const url = `http://${name}:4141`;
-                nodes.push({ url, token: '' });
+                nodes.push({ url, token: '', name });
                 console.log(`[Docker API] 发现节点: ${name} -> ${url}`);
             }
         }
@@ -51,7 +67,8 @@ async function discoverNodes() {
             const urls = process.env.COPILOT_NODES_URLS.split(',');
             for (const urlPart of urls) {
                 const url = urlPart.includes('://') ? urlPart : `http://${urlPart}`;
-                nodes.push({ url, token: '' });
+                const name = extractNodeName(url);
+                nodes.push({ url, token: '', name });
                 console.log(`[回退配置] 加载节点: ${url}`);
             }
         }
@@ -65,6 +82,7 @@ async function discoverNodes() {
 let NODES_CONFIG = [];
 const PORT = process.env.PORT || 3000;
 const POLL_INTERVAL = process.env.POLL_INTERVAL ? parseInt(process.env.POLL_INTERVAL) : 5 * 60 * 1000; // 从环境变量读取，默认5分钟
+const DRAINED_POLL_INTERVAL = process.env.DRAINED_POLL_INTERVAL ? parseInt(process.env.DRAINED_POLL_INTERVAL) : 60 * 60 * 1000; // DRAINED 节点检查间隔，默认1小时
 const HEALTH_CHECK_TIMEOUT = 5000; // 健康检查超时时间（毫秒）
 const REQUEST_TIMEOUT = 30000; // 代理请求超时时间（毫秒）
 
@@ -233,13 +251,27 @@ function startScheduler() {
             server.log.error(`Initial quota sweep failed: ${err.message}`);
         });
 
-    // 2. 设置定时器 - 常规配额检查
+    // 2. 设置定时器 - 常规配额检查（仅检查非 DRAINED 的活跃节点）
     setInterval(() => {
         server.log.info("Running periodic quota sweep...");
-        // 仅检查非永久失效的节点（INVALID_TOKEN 除外）
-        const activeNodes = nodeRegistry.filter(n => n.status !== 'INVALID_TOKEN');
-        activeNodes.forEach(syncNodeQuota);
+        // 仅检查非永久失效且非 DRAINED 的节点
+        const activeNodes = nodeRegistry.filter(n =>
+            n.status !== 'INVALID_TOKEN' && n.status !== 'DRAINED'
+        );
+        if (activeNodes.length > 0) {
+            server.log.info(`检查 ${activeNodes.length} 个活跃节点的配额...`);
+            activeNodes.forEach(syncNodeQuota);
+        }
     }, POLL_INTERVAL);
+
+    // 2.5 设置定时器 - DRAINED 节点配额恢复检查（低频率）
+    setInterval(() => {
+        const drainedNodes = nodeRegistry.filter(n => n.status === 'DRAINED');
+        if (drainedNodes.length > 0) {
+            server.log.info(`[低频检查] 检查 ${drainedNodes.length} 个 DRAINED 节点是否配额恢复...`);
+            drainedNodes.forEach(syncNodeQuota);
+        }
+    }, DRAINED_POLL_INTERVAL);
 
     // 3. 设置定时器 - 离线节点恢复检查（每30秒检查一次）
     const RECOVERY_INTERVAL = 30000; // 30秒
@@ -268,7 +300,7 @@ function startScheduler() {
             for (const node of newNodes) {
                 if (!existingUrls.has(node.url)) {
                     const newNode = {
-                        id: `node-${nodeRegistry.length + 1}`,
+                        id: node.name || extractNodeName(node.url),  // 使用节点名称作为 ID
                         url: node.url,
                         token: node.token,
                         status: 'UNKNOWN',
@@ -593,7 +625,7 @@ const start = async () => {
 
         // 初始化节点注册表
         nodeRegistry = NODES_CONFIG.map((node, index) => ({
-            id: `node-${index + 1}`,
+            id: node.name || extractNodeName(node.url),  // 使用节点名称作为 ID
             url: node.url,
             token: node.token,
             status: 'UNKNOWN',

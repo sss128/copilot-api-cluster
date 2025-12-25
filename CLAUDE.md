@@ -58,6 +58,7 @@ docker run --auth copilot-api
 可选的环境变量：
 - `GATEWAY_PORT`: 外部端口（默认: 8080）
 - `POLL_INTERVAL`: 配额检查间隔（毫秒，默认: 300000）
+- `DRAINED_POLL_INTERVAL`: DRAINED 节点配额检查间隔（毫秒，默认: 3600000，即1小时）
 - `COPILOT_NODES`: 节点配置的 JSON 数组（可选，不设置则使用 Docker API 自动发现）
 - `COPILOT_NODES_URLS`: 逗号分隔的节点地址（Docker API 不可用时的回退方案）
 
@@ -77,3 +78,7 @@ docker run --auth copilot-api
 ## API 端点
 - `GET /health`: 检查节点状态和配额
 - `POST /v1/chat/completions`: OpenAI 兼容的聊天端点
+
+## 开发注意事项
+- **版本更新**: 修改 `gateway/gateway.js` 后，必须同时更新 `gateway/package.json` 中的 `version` 字段，否则 Docker 镜像不会重新构建
+- **镜像版本**: `docker-compose.portainer.yml` 中的网关镜像版本 (`image: copilot-api-cluster-gateway:vX.X.X`) 建议与 package.json 版本保持一致

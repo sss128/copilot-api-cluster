@@ -21,7 +21,8 @@ x-copilot-node: &copilot-node-template
   labels:
     - "copilot.node=true"
   healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:4141/"]
+    # 检查服务可用且配额未耗尽 (remaining > 0)
+    test: ["CMD-SHELL", "curl -sf http://localhost:4141/usage | grep -q '\"remaining\":[1-9]'"]
     interval: 30s
     timeout: 10s
     retries: 3
@@ -37,7 +38,7 @@ services:
   # 网关通过 Docker API 自动发现带 copilot.node=true label 的容器
   smart-gateway:
     build: ./gateway
-    image: copilot-api-cluster-gateway:v1.0.0
+    image: copilot-api-cluster-gateway:v1.1.0
     restart: always
     ports: ["${GATEWAY_PORT:-8080}:3000"]
     environment:
