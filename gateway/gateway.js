@@ -30,12 +30,19 @@ async function discoverNodes() {
         });
 
         for (const container of containers) {
-            // 获取容器名（去掉开头的 /）
-            const name = container.Names[0].replace(/^\//, '');
-            // 使用容器内部端口 4141
-            const url = `http://${name}:4141`;
-            nodes.push({ url, token: '' });
-            console.log(`[Docker API] 发现节点: ${name} -> ${url}`);
+            // 从 Labels 中获取 compose 服务名，用于 Docker 网络内部通信
+            const serviceName = container.Labels['com.docker.compose.service'];
+            if (serviceName) {
+                const url = `http://${serviceName}:4141`;
+                nodes.push({ url, token: '' });
+                console.log(`[Docker API] 发现节点: ${serviceName} -> ${url}`);
+            } else {
+                // 回退到容器名（去掉开头的 /）
+                const name = container.Names[0].replace(/^\//, '');
+                const url = `http://${name}:4141`;
+                nodes.push({ url, token: '' });
+                console.log(`[Docker API] 发现节点: ${name} -> ${url}`);
+            }
         }
     } catch (error) {
         console.error(`[Docker API] 发现节点失败: ${error.message}`);
