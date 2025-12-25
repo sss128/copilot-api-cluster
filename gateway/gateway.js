@@ -7,11 +7,12 @@
 
 const Fastify = require('fastify');
 const axios = require('axios');
+const Docker = require('dockerode');
 
 // --- 配置区域 ---
 // 方式1：COPILOT_NODES 环境变量（JSON）- 完整控制每个节点
-// 方式2：自动探测模式 - 尝试连接 copilot-node-1, copilot-node-2... 直到连不上
-const MAX_NODE_PROBE = 20; // 最多探测20个节点
+// 方式2：Docker API 自动发现 - 查找带 copilot.node=true label 的容器
+const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
 async function discoverNodes() {
     if (process.env.COPILOT_NODES) {
@@ -20,36 +21,36 @@ async function discoverNodes() {
         return nodes;
     }
 
-    console.log('[自动探测] 开始发现节点...');
+    console.log('[Docker API] 开始发现节点...');
     const nodes = [];
-    let consecutiveNotFound = 0; // 连续未找到计数
 
-    for (let i = 1; i <= MAX_NODE_PROBE; i++) {
-        const url = `http://copilot-node-${i}:4141`;
-        try {
-            await axios.get(url, { timeout: 2000 });
+    try {
+        const containers = await docker.listContainers({
+            filters: { label: ['copilot.node=true'], status: ['running'] }
+        });
+
+        for (const container of containers) {
+            // 获取容器名（去掉开头的 /）
+            const name = container.Names[0].replace(/^\//, '');
+            // 使用容器内部端口 4141
+            const url = `http://${name}:4141`;
             nodes.push({ url, token: '' });
-            console.log(`[自动探测] 发现节点 ${i}: ${url}`);
-            consecutiveNotFound = 0; // 重置计数
-        } catch (error) {
-            if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-                consecutiveNotFound++;
-                console.log(`[自动探测] 节点 ${i} 不存在，跳过`);
-                // 连续3个节点不存在才停止探测
-                if (consecutiveNotFound >= 3) {
-                    console.log(`[自动探测] 连续 ${consecutiveNotFound} 个节点不存在，停止探测`);
-                    break;
-                }
-                continue;
+            console.log(`[Docker API] 发现节点: ${name} -> ${url}`);
+        }
+    } catch (error) {
+        console.error(`[Docker API] 发现节点失败: ${error.message}`);
+        // 如果 Docker API 不可用，尝试回退到环境变量
+        if (process.env.COPILOT_NODES_URLS) {
+            const urls = process.env.COPILOT_NODES_URLS.split(',');
+            for (const urlPart of urls) {
+                const url = urlPart.includes('://') ? urlPart : `http://${urlPart}`;
+                nodes.push({ url, token: '' });
+                console.log(`[回退配置] 加载节点: ${url}`);
             }
-            // 其他错误（如超时、HTTP错误）说明节点存在但可能有问题，继续添加
-            nodes.push({ url, token: '' });
-            console.log(`[自动探测] 发现节点 ${i}: ${url} (响应异常: ${error.code || error.message})`);
-            consecutiveNotFound = 0;
         }
     }
 
-    console.log(`[自动探测] 共发现 ${nodes.length} 个节点`);
+    console.log(`[节点发现] 共发现 ${nodes.length} 个节点`);
     return nodes;
 }
 

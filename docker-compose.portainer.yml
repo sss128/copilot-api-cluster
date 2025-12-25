@@ -1,5 +1,6 @@
 # Portainer 部署配置
-# 新增节点：复制 copilot-node-X 块，改数字，并在 volumes 区域添加对应卷
+# 新增节点：复制 node-X 块，改数字，并在 volumes 区域添加对应卷
+# 节点会通过 copilot.node=true label 被网关自动发现
 
 version: '3.8'
 
@@ -16,6 +17,8 @@ x-copilot-node: &copilot-node-template
     - HOST=0.0.0.0
   networks:
     - copilot-net
+  labels:
+    - "copilot.node=true"
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:4141/"]
     interval: 30s
@@ -30,7 +33,7 @@ services:
   node-3: { <<: *copilot-node-template, ports: ["4143:4141"], volumes: ["data-3:/root/.local/share/copilot-api"] }
 
   # ===== 智能网关 =====
-  # 网关启动时自动探测 copilot-node-1, copilot-node-2... 无需配置节点数量
+  # 网关通过 Docker API 自动发现带 copilot.node=true label 的容器
   smart-gateway:
     build: ./gateway
     restart: always
@@ -38,6 +41,8 @@ services:
     environment:
       PORT: 3000
       POLL_INTERVAL: ${POLL_INTERVAL:-300000}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - copilot-net
 

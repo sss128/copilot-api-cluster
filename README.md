@@ -8,6 +8,7 @@
 
 1. **Copilot API 节点**：多个 `ericc-ch/copilot-api` 容器实例，每个绑定独立的 GitHub Copilot 账号
 2. **智能网关**：基于 Node.js 的调度服务，负责：
+   - 通过 Docker API 自动发现带 `copilot.node=true` label 的节点
    - 监控各节点配额使用情况
    - 智能路由请求到可用节点
    - 自动故障转移和重试
@@ -36,11 +37,11 @@ cd copilot-api-cluster
 **认证第一个节点：**
 
 ```bash
-# 单独启动节点1
-docker-compose -f docker-compose.portainer.yml up -d copilot-node-1
+# 单独启动节点2
+docker-compose -f docker-compose.portainer.yml up -d node-2
 
 # 查看日志，获取认证链接
-docker-compose -f docker-compose.portainer.yml logs -f copilot-node-1
+docker-compose -f docker-compose.portainer.yml logs -f node-2
 ```
 
 日志中会显示类似内容：
@@ -61,17 +62,11 @@ and enter code: XXXX-XXXX
 重复上述步骤，依次认证其他节点（使用不同的 GitHub 账号）：
 
 ```bash
-# 节点2
-docker-compose -f docker-compose.portainer.yml up -d copilot-node-2
-docker-compose -f docker-compose.portainer.yml logs -f copilot-node-2
-
 # 节点3
-docker-compose -f docker-compose.portainer.yml up -d copilot-node-3
-docker-compose -f docker-compose.portainer.yml logs -f copilot-node-3
+docker-compose -f docker-compose.portainer.yml up -d node-3
+docker-compose -f docker-compose.portainer.yml logs -f node-3
 
-# 节点4
-docker-compose -f docker-compose.portainer.yml up -d copilot-node-4
-docker-compose -f docker-compose.portainer.yml logs -f copilot-node-4
+# 更多节点...
 ```
 
 > **注意**：每个节点应绑定不同的 GitHub Copilot 账号，以实现配额叠加。
@@ -135,7 +130,7 @@ GATEWAY_PORT=9000 docker-compose -f docker-compose.portainer.yml up -d
 
 - **智能网关**：默认运行在 `localhost:8080`
 - **Copilot 节点**：内部端口 `4141`，不对外暴露
-- **数据持久化**：认证信息保存在 Docker 命名卷中（`copilot_data_node1` 等）
+- **数据持久化**：认证信息保存在 Docker 命名卷中（`data-2`、`data-3` 等）
 
 ## 工作原理
 
@@ -205,7 +200,7 @@ docker-compose logs -f
 docker-compose logs -f smart-gateway
 
 # 查看特定节点日志
-docker-compose logs -f copilot-node-1
+docker-compose logs -f node-2
 ```
 
 ### 节点状态
@@ -220,10 +215,17 @@ docker-compose logs -f copilot-node-1
 
 ### 添加更多节点
 
-1. 在 `docker-compose.portainer.yml` 中复制一个节点配置，修改名称和卷名
-2. 启动新节点并完成 GitHub 认证（参见"首次部署"步骤）
-3. 更新 `smart-gateway` 服务的 `COPILOT_NODES` 环境变量，添加新节点
-4. 重启网关：`docker-compose -f docker-compose.portainer.yml restart smart-gateway`
+1. 在 `docker-compose.portainer.yml` 中复制节点定义，修改编号：
+   ```yaml
+   node-4: { <<: *copilot-node-template, ports: ["4144:4141"], volumes: ["data-4:/root/.local/share/copilot-api"] }
+   ```
+2. 在 `volumes` 区域添加对应卷：
+   ```yaml
+   volumes:
+     data-4:
+   ```
+3. 启动新节点并完成 GitHub 认证
+4. 网关会自动发现新节点（无需手动配置）
 
 ### 修改轮询间隔
 
@@ -241,8 +243,12 @@ cd gateway
 # 安装依赖（本地开发）
 npm install
 
-# 运行网关（需要设置环境变量）
-COPILOT_NODES='[{"url":"http://localhost:4141","token":"ghu_xxx"}]' node gateway.js
+# 运行网关
+# 方式1：使用环境变量指定节点
+COPILOT_NODES='[{"url":"http://localhost:4141","token":""}]' node gateway.js
+
+# 方式2：使用 Docker socket 自动发现（需要挂载 /var/run/docker.sock）
+node gateway.js
 ```
 
 ## 故障排除
@@ -252,16 +258,18 @@ COPILOT_NODES='[{"url":"http://localhost:4141","token":"ghu_xxx"}]' node gateway
 1. **认证失败或超时**
    - 确保网络能访问 `github.com`
    - 检查是否在规定时间内完成了浏览器授权
-   - 重启节点重新获取认证码：`docker-compose -f docker-compose.portainer.yml restart copilot-node-1`
+   - 重启节点重新获取认证码：`docker-compose -f docker-compose.portainer.yml restart node-2`
 
 2. **健康检查返回空节点列表**
    - 检查节点是否完成认证
+   - 确认节点容器带有 `copilot.node=true` label
+   - 确认网关已挂载 Docker socket
    - 查看网关日志：`docker-compose -f docker-compose.portainer.yml logs smart-gateway`
 
 3. **所有节点显示 OFFLINE**
    - 检查网络连接
    - 确认 Docker 容器正常运行
-   - 查看节点日志：`docker-compose -f docker-compose.portainer.yml logs copilot-node-1`
+   - 查看节点日志：`docker-compose -f docker-compose.portainer.yml logs node-2`
 
 4. **客户端连接失败**
    - 确认网关端口 `8080` 可访问

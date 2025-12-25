@@ -16,14 +16,17 @@ docker-compose -f docker-compose.portainer.yml up -d --build
 # 查看日志
 docker-compose logs -f                    # 所有服务
 docker-compose logs -f smart-gateway      # 仅网关
-docker-compose logs -f copilot-node-1     # 特定节点
+docker-compose logs -f node-2             # 特定节点
 ```
 
 ### 网关开发
 ```bash
 cd gateway
 npm install
-COPILOT_NODES='[{"url":"http://localhost:4141","token":"ghu_xxx"}]' node gateway.js
+# 方式1: 使用环境变量指定节点
+COPILOT_NODES='[{"url":"http://localhost:4141","token":""}]' node gateway.js
+# 方式2: 使用 Docker socket 自动发现（需要挂载 /var/run/docker.sock）
+node gateway.js
 ```
 
 ### 认证
@@ -36,14 +39,15 @@ docker run --auth copilot-api
 
 ### 核心组件
 1. **智能网关** (`gateway/gateway.js`): 管理多个 copilot-api 节点的 Node.js 服务
+   - 通过 Docker API 自动发现带 `copilot.node=true` label 的容器
    - 实现每 5 分钟的主动配额轮询
    - 将请求路由到有可用配额的节点
    - 处理自动故障转移和重试
 
 2. **Copilot API 节点**: 多个 ericc-ch/copilot-api 容器实例
    - 每个节点使用单独的 GitHub Copilot 账户
+   - 通过 `copilot.node=true` label 被网关自动发现
    - 认证状态持久化在 Docker 卷中
-   - 只能通过网关访问
 
 ### 关键模式
 - **星型拓扑**: 中央网关管理多个边缘节点
@@ -51,11 +55,11 @@ docker run --auth copilot-api
 - **OpenAI 兼容 API**: 网关暴露 `/v1/chat/completions` 端点
 
 ### 环境配置
-必要的环境变量：
-- `TOKEN_ACCOUNT_1`, `TOKEN_ACCOUNT_2` 等: GitHub Copilot 令牌
+可选的环境变量：
 - `GATEWAY_PORT`: 外部端口（默认: 8080）
-- `POLL_INTERVAL`: 配额检查间隔（毫秒）
-- `COPILOT_NODES`: 节点配置的 JSON 数组
+- `POLL_INTERVAL`: 配额检查间隔（毫秒，默认: 300000）
+- `COPILOT_NODES`: 节点配置的 JSON 数组（可选，不设置则使用 Docker API 自动发现）
+- `COPILOT_NODES_URLS`: 逗号分隔的节点地址（Docker API 不可用时的回退方案）
 
 ## 重要文件
 - `docker-compose.portainer.yml`: 主要编排文件
@@ -66,10 +70,9 @@ docker run --auth copilot-api
 
 ## 添加新节点
 添加新的 copilot-api 节点：
-1. 将令牌添加到 `.env` 文件
-2. 在 `docker-compose.yml` 中添加服务定义
-3. 更新 `COPILOT_NODES` 环境变量
-4. 重启服务
+1. 在 `docker-compose.portainer.yml` 中复制节点定义，修改编号
+2. 在 `volumes` 区域添加对应的数据卷
+3. 重启服务，网关会自动发现新节点
 
 ## API 端点
 - `GET /health`: 检查节点状态和配额
