@@ -37,6 +37,7 @@ services:
   # 网关通过 Docker API 自动发现带 copilot.node=true label 的容器
   smart-gateway:
     build: ./gateway
+    image: copilot-api-cluster-gateway:v1.0.0
     restart: always
     ports: ["${GATEWAY_PORT:-8080}:3000"]
     environment:
