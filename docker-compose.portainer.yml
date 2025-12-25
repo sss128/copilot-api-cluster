@@ -26,8 +26,8 @@ x-copilot-node: &copilot-node-template
 services:
   # ===== Copilot 节点 =====
   # 新增节点：复制下面的模板，把 N 替换成新数字
-  copilot-node-2: { <<: *copilot-node-template, ports: ["4142:4141"], volumes: ["data-2:/root/.local/share/copilot-api"] }
-  copilot-node-3: { <<: *copilot-node-template, ports: ["4143:4141"], volumes: ["data-3:/root/.local/share/copilot-api"] }
+  node-2: { <<: *copilot-node-template, ports: ["4142:4141"], volumes: ["data-2:/root/.local/share/copilot-api"] }
+  node-3: { <<: *copilot-node-template, ports: ["4143:4141"], volumes: ["data-3:/root/.local/share/copilot-api"] }
 
   # ===== 智能网关 =====
   # 网关启动时自动探测 copilot-node-1, copilot-node-2... 无需配置节点数量
